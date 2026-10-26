@@ -22,7 +22,7 @@ function boot(html, storage = new Map(), failWrite = () => false) {
     });
     return elements.get(id);
   }
-  const context = vm.createContext({console, Date, Math, JSON, Number, String, Boolean,
+  const context = vm.createContext({requestAnimationFrame(){return 1},cancelAnimationFrame(){},console, Date, Math, JSON, Number, String, Boolean,
     Object, Array, Set, Map, Intl, Error, Blob,
     URL:{createObjectURL(b){blob=b;return 'blob:test'},revokeObjectURL(){}},
     FileReader:class {readAsText(){this.result=fileText;this.onload()}},
@@ -65,12 +65,19 @@ async function main() {
     });save();
   })`);
   const beforeRaw = old.storage.get(KEY), before = JSON.parse(beforeRaw);
-  assert.equal(before.length,5); // Includes today's empty draft, created by old initialization.
+  assert.equal(before.length,4); // Current HEAD keeps empty drafts out of storage.
+  assert.equal(old.run('sessions().filter(trained).length'),4);
   const oldMetrics = new Map(before.map(s=>{
     old.context.fixture=s;
     return [s.date,plain(old.run('({totals:totals(fixture),ex:fixture.exercises.map(e=>exStats(e,fixture))})'))];
   }));
-  const app = boot(newHtml, new Map(old.storage));
+  // Preserve any backup already made by HEAD, and also test a fresh migration backup.
+  const existingBackup=old.storage.get(KEY+'_respaldo_v2');
+  const upgraded=boot(newHtml,new Map(old.storage));
+  assert.equal(upgraded.storage.get(KEY+'_respaldo_v2'),existingBackup);
+  const migrationStorage=new Map(old.storage);migrationStorage.delete(KEY+'_respaldo_v2');
+  const app = boot(newHtml, migrationStorage);
+  app.run('backupData()'); // First-write backup; HEAD sessions already use calculationVersion 2.0.
   assert.deepEqual(plain(app.run('EXERCISES')),defaults,'Exact exercise names/order/properties');
   assert.equal(app.run('STORAGE_KEY'),KEY);
   assert.equal(app.run('CYCLES_KEY'),CYCLES);
@@ -117,7 +124,7 @@ async function main() {
     for(let i=0;i<9;i++)app.run(`go('train',${i});parametersOpen=true;renderTrain()`);
   }
   app.run(`go('history')`);
-  assert.equal((app.element('app').innerHTML.match(/class="bw-card history-metric"/g)||[]).length,9);
+  assert.equal((app.element('app').innerHTML.match(/class="bw-card history-metric"/g)||[]).length,18);
   // Exercise the actual Blob download and file-input import, including cycles.
   app.run(`load('2026-10-19');newCycle();cycleDraft.name='Emilia';cycleDraft.startDate='2026-10-01';
     selectCycleExercise('Peso Muerto Smith',true);generatePlan(cycleDraft);saveCycle();activateCycle(cycles()[0].id);
@@ -144,10 +151,13 @@ async function main() {
   }
   // Backup quota failure blocks migration; failure writing migrated data preserves original.
   for(const failedKey of [KEY+'_respaldo_v2',KEY]) {
-    const failed=boot(newHtml,new Map(old.storage),k=>k===failedKey);
-    assert.equal(failed.storage.get(KEY),beforeRaw);
+    const quotaStorage=new Map(old.storage);quotaStorage.delete(KEY+'_respaldo_v2');
+    const legacyRaw=JSON.stringify(before.map(({summary,...session})=>session));
+    quotaStorage.set(KEY,legacyRaw);
+    const failed=boot(newHtml,quotaStorage,k=>k===failedKey);
+    assert.equal(failed.storage.get(KEY),legacyRaw);
     assert.ok(failed.element('app').innerHTML.includes('Datos protegidos'));
-    failed.intervals.forEach(fn=>fn());assert.equal(failed.storage.get(KEY),beforeRaw);
+    failed.intervals.forEach(fn=>fn());assert.equal(failed.storage.get(KEY),legacyRaw);
   }
   // Setting barWeight to a nonzero value cannot affect any NEW metric.
   app.run(`load('2026-10-19')`);
@@ -166,11 +176,11 @@ async function main() {
   assert.deepEqual(JSON.parse(fs.readFileSync('manifest.json','utf8')),
     JSON.parse(execFileSync('git',['show','HEAD:manifest.json'],{encoding:'utf8'})));
   for(const meta of oldHtml.matchAll(/<meta[^>]+>/g))assert.ok(newHtml.includes(meta[0]));
-  assert.ok(newHtml.includes("register('./sw.js?v=5')"));
-  const sw=fs.readFileSync('sw.js','utf8');assert.ok(sw.includes("CACHE='emilia-workout-v5'"));
+  assert.ok(newHtml.includes("register('./sw.js?v=6')"));
+  const sw=fs.readFileSync('sw.js','utf8');assert.ok(sw.includes("CACHE='emilia-workout-v6'"));
   for(const name of fs.readdirSync('fonts'))assert.ok(sw.includes('./fonts/'+name));
   require('./regresiones.cjs');
-  console.log('PASS: HEAD real → nueva app, 4 fechas entrenadas + borrador, 9 ejercicios/fecha, kg/lbs, 5RM/ROM/peso corporal exactos, Blob → archivo → importación sin pérdida.');
+  console.log('PASS: HEAD real → nueva app, 4 fechas entrenadas, 9 ejercicios/fecha, kg/lbs, 5RM/ROM/peso corporal exactos, Blob → archivo → importación sin pérdida.');
   console.table(changes);
   console.log('Barra Emilia: Δ volumen = 0 kg·reps; fuerza = 0 N; trabajo = 0 J; potencia = 0 W; intensidad legada = 0 pp. Asistidos de origen: ninguno.');
 }
